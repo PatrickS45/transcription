@@ -108,22 +108,89 @@ def _layout_by_width(
     return None
 
 
-def _split_subtitle(sub: Subtitle) -> tuple[Subtitle, Subtitle]:
-    """Scinde un sous-titre en deux au milieu de ses mots (frontière de mot),
-    en privilégiant le plus grand silence interne comme point de coupure."""
+def _split_subtitle(sub: Subtitle, duree_min_ms: float = 0.0) -> tuple[Subtitle, Subtitle]:
+    """Scinde un sous-titre en deux à la meilleure frontière de mot.
+
+    Le point de coupure privilégie, dans l'ordre : la ponctuation de fin de
+    phrase, les silences internes, la ponctuation faible, l'équilibre des
+    deux moitiés — et évite les coupures qui créeraient une moitié trop
+    courte pour être affichée à la durée minimale.
+    """
     words = sub.words
     n = len(words)
-    # Point de coupure : plus grand gap inter-mots dans le tiers central,
-    # sinon moitié — on reste proche des pauses naturelles autant que possible.
-    lo, hi = max(1, n // 3), min(n - 1, (2 * n) // 3 + 1)
-    best_cut, best_gap = n // 2, -1.0
-    for i in range(lo, hi):
-        gap = words[i].start - words[i - 1].end
-        if gap > best_gap:
-            best_cut, best_gap = i, gap
+    min_s = duree_min_ms / 1000.0
+    best_cut, best_score = n // 2, float("-inf")
+    for i in range(1, n):
+        prev = words[i - 1].text
+        punct = 0.0
+        if prev:
+            if prev[-1] in ".!?…":
+                punct = 2.0
+            elif prev[-1] in ",;:":
+                punct = 1.0
+        gap = min(max(words[i].start - words[i - 1].end, 0.0), 1.0)
+        balance = -abs(i - n / 2) / n
+        duration_penalty = 0.0
+        if (words[i - 1].end - words[0].start) < min_s or (
+            words[-1].end - words[i].start
+        ) < min_s:
+            duration_penalty = -3.0
+        score = 2.0 * gap + punct + balance + duration_penalty
+        if score > best_score:
+            best_cut, best_score = i, score
     first = Subtitle(words=words[:best_cut], start=words[0].start, end=words[best_cut - 1].end)
     second = Subtitle(words=words[best_cut:], start=words[best_cut].start, end=words[-1].end)
     return first, second
+
+
+def _merge_short_rendered(
+    subtitles: list[Subtitle],
+    constraints,
+    fmt: FormatConfig,
+    measurer: FontMeasurer,
+    available: float,
+) -> list[Subtitle]:
+    """Après le reflow, refusionne les sous-titres trop courts pour atteindre
+    leur durée requise, à condition que le résultat fusionné tienne toujours
+    dans le cadre (revalidation par rendu réel) — les scissions de l'étape 4
+    ne doivent pas réintroduire de flashs illisibles.
+    """
+    from segmentation import _can_reach_needed
+
+    changed = True
+    while changed and len(subtitles) > 1:
+        changed = False
+        for i in range(len(subtitles)):
+            if _can_reach_needed(subtitles, i, constraints):
+                continue
+            for j in (i - 1, i):  # fusion avec le précédent, sinon le suivant
+                if not (0 <= j and j + 1 < len(subtitles)):
+                    continue
+                merged_words = subtitles[j].words + subtitles[j + 1].words
+                if (merged_words[-1].end - merged_words[0].start) * 1000.0 > constraints.duree_max_ms:
+                    continue
+                lines = _layout_by_width(
+                    [w.text for w in merged_words],
+                    measurer,
+                    available,
+                    fmt.lignes_max,
+                    fmt.mots_max_par_ligne,
+                    fmt.caracteres_max_par_ligne,
+                )
+                if lines is None:
+                    continue
+                merged = Subtitle(
+                    words=merged_words,
+                    lines=lines,
+                    start=merged_words[0].start,
+                    end=merged_words[-1].end,
+                )
+                subtitles[j : j + 2] = [merged]
+                changed = True
+                break
+            if changed:
+                break
+    return subtitles
 
 
 def validate_and_reflow(
@@ -208,7 +275,7 @@ def validate_and_reflow(
             done.append(sub)
             continue
 
-        first, second = _split_subtitle(sub)
+        first, second = _split_subtitle(sub, cfg.duree_min_ms)
         iterations[id(first)] = iterations[key]
         iterations[id(second)] = iterations[key]
         report.splits += 1
@@ -216,8 +283,10 @@ def validate_and_reflow(
         queue.insert(0, second)
         queue.insert(0, first)
 
-    # Après reformatage, revérifier les contraintes de durée / cps / écart
-    # sur le nouveau découpage (CDC §4 étape 4.6).
+    # Les scissions peuvent avoir créé des sous-titres trop courts pour être
+    # étendus : refusionner (avec revalidation de largeur) avant d'appliquer
+    # les contraintes de durée / cps / écart sur le découpage final (§4.6).
+    done = _merge_short_rendered(done, constraints, fmt, measurer, available)
     _enforce_timing(done, constraints)
     for sub in done:
         if sub.chars_per_second > constraints.car_sec_max + 0.5:

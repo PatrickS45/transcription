@@ -1,4 +1,10 @@
-from models import Segment, TranscriptionResult, Word, merge_elision_fragments
+from models import (
+    Segment,
+    TranscriptionResult,
+    Word,
+    merge_elision_fragments,
+    sanitize_word_timing,
+)
 
 
 def test_json_roundtrip(tmp_path):
@@ -49,6 +55,50 @@ def test_merge_elision_fragments():
     # Les timestamps du premier et dernier fragment fusionné sont préservés.
     assert words[0].start == 0.0 and words[0].end == 0.4
     assert words[1].start == 0.5 and words[1].end == 1.1
+
+
+def test_sanitize_redistributes_impossible_timestamps():
+    """Une suite de mots compressée sur ~1 ms est réétalée sur la fenêtre des
+    mots voisins quand le temps existe (cas réel : hallucination Whisper au
+    milieu d'une phrase par ailleurs bien datée)."""
+    seg = Segment(words=[
+        Word("Autre", 32.18, 32.50), Word("avantage", 32.55, 33.00),
+        Word("important,", 33.05, 33.277),
+        # Compressé sur 1 ms :
+        Word("que", 33.360, 33.3603), Word("le", 33.3603, 33.3606),
+        Word("compte", 33.3606, 33.361),
+        # Suite saine, lente :
+        Word("peut", 33.380, 34.10), Word("être", 34.15, 34.80),
+        Word("rémunéré.", 34.85, 35.80),
+    ])
+    result = TranscriptionResult(segments=[seg])
+    sanitize_word_timing(result, car_sec_max=20.0)
+    words = result.segments[0].words
+    assert len(words) == 9  # rien n'est supprimé
+    for w in words:
+        dur = w.end - w.start
+        assert dur > 0
+        assert len(w.text) / dur < 50, f"{w.text!r} encore impossible ({dur*1000:.1f}ms)"
+    # L'ordre temporel est préservé.
+    for a, b in zip(words, words[1:]):
+        assert a.end <= b.start + 1e-9
+
+
+def test_sanitize_drops_unfixable_hallucination():
+    """Quand le temps de parole n'existe pas dans l'audio (fenêtre voisine
+    déjà dense), le texte est supprimé avec un avertissement explicite."""
+    words = [Word(f"mot{k}", 10.0 + k * 0.35, 10.0 + k * 0.35 + 0.3) for k in range(6)]
+    # Phrase entière hallucinée dans un trou de 2 ms entre deux mots denses.
+    hallucination = [
+        Word(t, 12.101 + i * 0.0003, 12.101 + (i + 1) * 0.0003)
+        for i, t in enumerate("la société peut être en train de se faire rembourser.".split())
+    ]
+    tail = [Word(f"suite{k}", 12.104 + k * 0.35, 12.104 + k * 0.35 + 0.3) for k in range(6)]
+    result = TranscriptionResult(segments=[Segment(words=words + hallucination + tail)])
+    warnings = sanitize_word_timing(result, car_sec_max=20.0, max_expand=2)
+    remaining = " ".join(w.text for w in result.segments[0].words)
+    assert "rembourser" not in remaining
+    assert any("hallucination" in w for w in warnings)
 
 
 def test_merge_elision_leading_fragment_kept_as_is():

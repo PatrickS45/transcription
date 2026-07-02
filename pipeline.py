@@ -12,7 +12,7 @@ from typing import Callable
 
 from config import PipelineConfig
 from correction import correct_transcription
-from models import TranscriptionResult, merge_elision_fragments
+from models import TranscriptionResult, merge_elision_fragments, sanitize_word_timing
 from rendering import FontMeasurer, RenderReport, validate_and_reflow
 from segmentation import segment_for_format
 from srt_export import output_paths, write_srt
@@ -25,10 +25,14 @@ class PipelineResult:
     transcription_json: Path | None = None
     srt_files: dict[str, Path] = field(default_factory=dict)
     reports: dict[str, RenderReport] = field(default_factory=dict)
+    #: Avertissements du prétraitement (timestamps réparés, texte supprimé…).
+    preprocess_warnings: list[str] = field(default_factory=list)
 
     @property
     def warnings(self) -> list[str]:
-        return [w for r in self.reports.values() for w in r.warnings]
+        return self.preprocess_warnings + [
+            w for r in self.reports.values() for w in r.warnings
+        ]
 
     def summary(self) -> str:
         lines = []
@@ -131,6 +135,7 @@ def run_pipeline(
         # Corrige rétroactivement les fragments élidés/composés d'anciennes
         # transcriptions sauvegardées avant ce correctif (pas de retranscription).
         result = merge_elision_fragments(result)
+        preprocess_warnings = sanitize_word_timing(result, cfg.car_sec_max)
     else:
         notify(
             f"Transcription ({cfg.moteur_transcription}, modèle {cfg.modele}, "
@@ -138,6 +143,7 @@ def run_pipeline(
         )
         result = transcribe_step(video_path, cfg, progress)
         result = merge_elision_fragments(result)
+        preprocess_warnings = sanitize_word_timing(result, cfg.car_sec_max)
         base = Path(out_dir) if out_dir else Path(video_path).parent
         json_path = base / f"{Path(video_path).stem}_transcription.json"
         result.save_json(json_path)
@@ -153,4 +159,7 @@ def run_pipeline(
 
     out = layout_and_export(result, cfg, video_path, out_dir, progress)
     out.transcription_json = json_path
+    out.preprocess_warnings = preprocess_warnings
+    for w in preprocess_warnings:
+        notify(f"⚠ {w}")
     return out
