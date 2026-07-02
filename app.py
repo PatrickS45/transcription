@@ -219,7 +219,9 @@ def build_app():
 
             def notify(msg: str) -> None:
                 messages.append(msg)
-                progress(0, desc=msg)
+                # Pas de progression fractionnaire connue à l'avance (durée du
+                # téléchargement/transcription variable) : indicateur indéterminé.
+                progress(None, desc=msg)
 
             result = run_pipeline(video_path, cfg, replay_json=replay, progress=notify)
             files = [str(p) for p in result.srt_files.values()]
