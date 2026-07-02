@@ -94,6 +94,28 @@ def test_layout_lines_impossible():
     assert layout_lines(["a"] * 10, max_lines=2, max_words_per_line=3) is None
 
 
+def test_merge_timing_anomaly_avoids_unreadable_flash():
+    """Un mot aux timestamps corrompus (hallucination/duplication du moteur,
+    ex. une phrase entière compressée sur quelques ms) doit être fusionné
+    avec un voisin plutôt que de produire un sous-titre illisible qui viole
+    silencieusement la durée minimale."""
+    words = make_words(["avant", "la", "pause"], gap=0.05)
+    # Mot-phrase anormal : ~50 caractères en 1 ms (timestamps corrompus).
+    anomaly_start = words[-1].end + 0.3
+    anomaly = Word("phraseentierecompresseeavecdestimestampscorrompus",
+                   anomaly_start, anomaly_start + 0.001)
+    tail = make_words(["puis", "la", "suite", "normale", "continue"],
+                      start=anomaly.end + 0.3, gap=0.05)
+    subs = segment_words(words + [anomaly] + tail, default_constraints(),
+                         seuil_silence_ms=250)
+    # Aucun sous-titre ne doit avoir une durée ridicule tout en portant
+    # l'intégralité du texte anormal (donc pas de flash sub-milliseconde).
+    assert all(s.duration_ms > 50 for s in subs)
+    assert "phraseentierecompresseeavecdestimestampscorrompus" in "".join(
+        w.text for s in subs for w in s.words
+    )
+
+
 def test_segment_for_format_defaults():
     cfg = PipelineConfig()
     fmt = FormatConfig(mots_max_par_ligne=4, lignes_max=2)

@@ -106,6 +106,28 @@ class TranscriptionResult:
         return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
+def merge_elision_fragments(result: TranscriptionResult) -> TranscriptionResult:
+    """Recolle les fragments de mots que certains moteurs tokenisent
+    séparément de part et d'autre d'une apostrophe ou d'un trait d'union
+    (ex. "d" + "'associé" -> "d'associé", "c'est" + "-à" + "-dire"), pour
+    éviter l'espace parasite qui apparaît sinon dans les sous-titres.
+
+    Appliquée sur le résultat brut du moteur de transcription, avant toute
+    autre étape, de façon à ce que segmentation et correction LLM travaillent
+    sur des mots déjà correctement recollés.
+    """
+    for seg in result.segments:
+        merged: list[Word] = []
+        for w in seg.words:
+            if merged and w.text and w.text[0] in ("'", "-", "’"):
+                prev = merged[-1]
+                merged[-1] = Word(text=prev.text + w.text, start=prev.start, end=w.end)
+            else:
+                merged.append(w)
+        seg.words = merged
+    return result
+
+
 @dataclass
 class Subtitle:
     """Un sous-titre affichable : mots + timestamps, puis lignes après mise en page.

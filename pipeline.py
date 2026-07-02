@@ -12,7 +12,7 @@ from typing import Callable
 
 from config import PipelineConfig
 from correction import correct_transcription
-from models import TranscriptionResult
+from models import TranscriptionResult, merge_elision_fragments
 from rendering import FontMeasurer, RenderReport, validate_and_reflow
 from segmentation import segment_for_format
 from srt_export import output_paths, write_srt
@@ -128,12 +128,16 @@ def run_pipeline(
         notify(f"Rejeu depuis la transcription sauvegardée : {replay_json}")
         result = TranscriptionResult.load_json(replay_json)
         json_path = Path(replay_json)
+        # Corrige rétroactivement les fragments élidés/composés d'anciennes
+        # transcriptions sauvegardées avant ce correctif (pas de retranscription).
+        result = merge_elision_fragments(result)
     else:
         notify(
             f"Transcription ({cfg.moteur_transcription}, modèle {cfg.modele}, "
             f"device {cfg.device}, langue forcée {cfg.langue})…"
         )
         result = transcribe_step(video_path, cfg, progress)
+        result = merge_elision_fragments(result)
         base = Path(out_dir) if out_dir else Path(video_path).parent
         json_path = base / f"{Path(video_path).stem}_transcription.json"
         result.save_json(json_path)

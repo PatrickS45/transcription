@@ -28,7 +28,12 @@ class FasterWhisperBackend(TranscriptionBackend):
             ) from e
 
         notify = progress or (lambda msg: None)
-        notify(f"Chargement du modèle {model} sur {device}…")
+        notify(
+            f"Chargement du modèle {model} sur {device}… (premier lancement : "
+            "téléchargement depuis Hugging Face, plusieurs minutes selon la "
+            "connexion — les lancements suivants seront quasi instantanés, "
+            "modèle mis en cache)"
+        )
         compute_type = "float16" if device == "cuda" else "int8"
         whisper = WhisperModel(model, device=device, compute_type=compute_type)
 

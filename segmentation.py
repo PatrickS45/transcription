@@ -107,8 +107,40 @@ def segment_words(
         block.append(word)
     flush()
 
+    subtitles = _merge_timing_anomalies(subtitles, constraints)
     _enforce_timing(subtitles, constraints)
     return subtitles
+
+
+def _merge_timing_anomalies(
+    subtitles: list[Subtitle], c: HardConstraints
+) -> list[Subtitle]:
+    """Fusionne les sous-titres dont la vitesse de lecture instantanée est
+    physiquement impossible (indice de timestamps corrompus, ex. duplication/
+    hallucination du moteur de transcription à la frontière d'un chunk VAD)
+    avec le sous-titre voisin, plutôt que de produire un flash illisible de
+    quelques millisecondes qui violerait silencieusement la durée minimale.
+    """
+    threshold = c.car_sec_max * 3
+    result: list[Subtitle] = []
+    i = 0
+    while i < len(subtitles):
+        sub = subtitles[i]
+        if sub.chars_per_second > threshold and i + 1 < len(subtitles):
+            nxt = subtitles[i + 1]
+            words = sub.words + nxt.words
+            subtitles[i + 1] = Subtitle(words=words, start=words[0].start, end=words[-1].end)
+            i += 1
+            continue
+        if sub.chars_per_second > threshold and result:
+            prev = result.pop()
+            words = prev.words + sub.words
+            result.append(Subtitle(words=words, start=words[0].start, end=words[-1].end))
+            i += 1
+            continue
+        result.append(sub)
+        i += 1
+    return result
 
 
 def _enforce_timing(subtitles: list[Subtitle], c: HardConstraints) -> None:
